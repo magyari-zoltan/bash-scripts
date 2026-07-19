@@ -18,22 +18,44 @@
 
 set -u
 
-AUDIO_SOURCE=""
+# Constants
 WORK_DIR="./recording"
 WHISPER_VENV="$HOME/.venvs/whisper"
+RECORDING_FINISHED_FILE="$WORK_DIR/recording.finished"
 
+# Script arguments
+AUDIO_SOURCE=""
 LANGUAGE=""
 TASK=""
 CONTINUE_RECORDING=false
 
-FFMPEG_PID=""
-WHISPER_PID=""
-RECORDING_STOP_REQUESTED=false
-WHISPER_STOP_REQUESTED=false
+# Process IDs and flags
 VENV_ACTIVATED_BY_SCRIPT=false
 
-RECORDING_FINISHED_FILE="$WORK_DIR/recording.finished"
+FFMPEG_PID=""
+RECORDING_STOP_REQUESTED=false
 
+WHISPER_PID=""
+WHISPER_STOP_REQUESTED=false
+
+RECORDING_UI_PID=""
+RECORDING_UI_ACTIVE=false
+
+# Terminal control sequences
+ESC=$'\033'
+CARRIAGE_RETURN=$'\r'
+CLEAR_LINE="${ESC}[2K"
+CLEAR_SCREEN="${ESC}[2J"
+CURSOR_HOME="${ESC}[H"
+ALT_BUFFER_ENTER="${ESC}[?1049h"
+ALT_BUFFER_EXIT="${ESC}[?1049l"
+CURSOR_HIDE="${ESC}[?25l"
+CURSOR_SHOW="${ESC}[?25h"
+TEXT_DIM="${ESC}[2m"
+TEXT_RESET="${ESC}[0m"
+TEXT_BRIGHT_RED="${ESC}[91m"
+TEXT_YELLOW="${ESC}[33m"
+TEXT_CYAN="${ESC}[36m"
 
 usage() {
     cat <<EOF
@@ -167,6 +189,7 @@ activate_whisper_venv() {
     # shellcheck disable=SC1091
     source "$WHISPER_VENV/bin/activate"
 
+    # Set a flag to indicate that the virtual environment was activated by this script.
     VENV_ACTIVATED_BY_SCRIPT=true
 }
 
@@ -183,12 +206,11 @@ deactivate_whisper_venv() {
 
 activate_whisper_venv
 
-
+# Check if the whisper command is available after activating the virtual environment
 if ! command -v whisper &>/dev/null; then
     echo "Error: whisper command not found." >&2
     exit 1
 fi
-
 
 # ─────────────────────────────────────────────
 # Helper functions
@@ -259,7 +281,6 @@ has_pending_transcriptions() {
     done
 
     shopt -u nullglob
-
     return 1
 }
 
@@ -283,8 +304,71 @@ get_next_recording_index() {
 
 concatenate_transcripts() {
     rm -f "$WORK_DIR/audio_all.txt"
-
     printf '%s\n' "$WORK_DIR"/audio_*.txt | sort -V | xargs cat > "$WORK_DIR/audio_all.txt"
+}
+
+
+# ─────────────────────────────────────────────
+# Diplay script status in the terminal
+# ─────────────────────────────────────────────
+
+start_recording_animation() {
+    local frame_index=0
+    local frames=("·" "•" "●" "•")
+
+    if [[ ! -t 1 ]]; then
+        return
+    fi
+
+    RECORDING_UI_ACTIVE=true
+
+    # Switch to the terminal's alternate screen buffer.
+    printf '%s' "$ALT_BUFFER_ENTER"
+    # Hide the cursor while the recording status is animated.
+    printf '%s' "$CURSOR_HIDE"
+    # Clear the alternate screen before drawing the status line.
+    printf '%s%s' "$CURSOR_HOME" "$CLEAR_SCREEN"
+
+    (
+        while true; do
+            # Rewrite the same line with the next spinner frame.
+            printf '%s%s%s%sRecording in progress: %s%s%s%s' \
+                "$CARRIAGE_RETURN" \
+                "$CLEAR_LINE" \
+                "$TEXT_RESET" \
+                "$TEXT_DIM" \
+                "$TEXT_RESET" \
+                "$TEXT_BRIGHT_RED" \
+                "${frames[frame_index % 4]}" \
+                "$TEXT_RESET"
+            sleep 0.2
+            ((frame_index++))
+        done
+    ) &
+
+    RECORDING_UI_PID=$!
+}
+
+
+stop_recording_animation() {
+    if [[ -n "$RECORDING_UI_PID" ]] &&
+       kill -0 "$RECORDING_UI_PID" 2>/dev/null; then
+
+        kill "$RECORDING_UI_PID"
+        wait "$RECORDING_UI_PID" 2>/dev/null || true
+    fi
+
+    if [[ "$RECORDING_UI_ACTIVE" == true ]]; then
+        # Clear the status line, show the cursor, and return to the main buffer.
+        printf '%s%s%s%s' \
+            "$CARRIAGE_RETURN" \
+            "$CLEAR_LINE" \
+            "$CURSOR_SHOW" \
+            "$ALT_BUFFER_EXIT"
+        RECORDING_UI_ACTIVE=false
+    fi
+
+    RECORDING_UI_PID=""
 }
 
 
@@ -317,13 +401,13 @@ stop_recording() {
 
 
 cleanup() {
+    stop_recording_animation
     deactivate_whisper_venv
 }
 
 
 trap stop_recording INT TERM
 trap cleanup EXIT
-
 
 # ─────────────────────────────────────────────
 # Whisper worker
@@ -368,7 +452,8 @@ transcribe_worker() {
                 --fp16 False \
                 --threads 6 \
                 --task "$TASK" \
-                --language "$LANGUAGE"
+                --language "$LANGUAGE" \
+                >/dev/null 2>&1
             then
                 rm -f "$ready_file"
                 ((index++))
@@ -425,46 +510,36 @@ restore_existing_segments() {
     shopt -u nullglob
 }
 
-
 restore_existing_segments
-
 
 # ─────────────────────────────────────────────
 # Determine operating mode
 # ─────────────────────────────────────────────
 
 if ! has_existing_recordings; then
-
     echo "No existing audio segments found."
     echo "Starting a new recording..."
 
     CONTINUE_RECORDING=true
 
 elif [[ "$CONTINUE_RECORDING" == false ]]; then
-
     touch "$RECORDING_FINISHED_FILE"
 
     if has_pending_transcriptions; then
-
         echo "Existing recording detected."
         echo "Audio recording will not continue."
         echo "Whisper will process the remaining segments."
 
         transcribe_worker
-
     else
         echo "No audio segments are waiting for processing."
     fi
 
     exit 0
-
 else
-
     echo "Existing recording detected."
     echo "Continuing audio recording and Whisper processing."
-
 fi
-
 
 # ─────────────────────────────────────────────
 # Start or continue recording
@@ -472,12 +547,11 @@ fi
 
 rm -f "$RECORDING_FINISHED_FILE"
 
+start_recording_animation
 transcribe_worker &
-
 WHISPER_PID=$!
 
 index="$(get_next_recording_index)"
-
 
 while [[ "$RECORDING_STOP_REQUESTED" == false ]]; do
 
@@ -486,10 +560,15 @@ while [[ "$RECORDING_STOP_REQUESTED" == false ]]; do
     audio_file="$(get_audio_file "$index")"
     ready_file="$(get_ready_file "$index")"
 
-    echo
-    echo "Starting audio segment:"
-    echo "  File:     $audio_file"
-    echo "  Duration: $((segment_time / 60)) minutes"
+    # Move the cursor to the top and clear the alternate screen before printing.
+    printf '%s%s' "$CURSOR_HOME" "$CLEAR_SCREEN"
+
+    printf '\n%sStarting audio segment:%s\n' "$TEXT_DIM" "$TEXT_RESET"
+    printf '  File:     %s%s%s\n' "$TEXT_YELLOW" "$audio_file" "$TEXT_RESET"
+    printf '  Duration: %s%s minutes%s\n' \
+        "$TEXT_CYAN" \
+        "$((segment_time / 60))" \
+        "$TEXT_RESET"
 
     ffmpeg \
         -f pulse \
@@ -497,7 +576,10 @@ while [[ "$RECORDING_STOP_REQUESTED" == false ]]; do
         -t "$segment_time" \
         -ac 1 \
         -ar 16000 \
-        "$audio_file" &
+        -hide_banner \
+        -loglevel error \
+        -nostats \
+        "$audio_file" >/dev/null 2>&1 &
 
     FFMPEG_PID=$!
 
@@ -511,9 +593,7 @@ while [[ "$RECORDING_STOP_REQUESTED" == false ]]; do
     fi
 
     ((index++))
-
 done
-
 
 # ─────────────────────────────────────────────
 # Finish remaining Whisper processing
@@ -521,7 +601,8 @@ done
 
 touch "$RECORDING_FINISHED_FILE"
 
-echo
+stop_recording_animation
+
 echo "Audio recording stopped."
 echo "Whisper will continue processing the remaining segments."
 
