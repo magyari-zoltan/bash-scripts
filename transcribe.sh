@@ -281,6 +281,13 @@ get_next_recording_index() {
 }
 
 
+concatenate_transcripts() {
+    rm -f "$WORK_DIR/audio_all.txt"
+
+    printf '%s\n' "$WORK_DIR"/audio_*.txt | sort -V | xargs cat > "$WORK_DIR/audio_all.txt"
+}
+
+
 # ─────────────────────────────────────────────
 # Signal handling and cleanup
 # ─────────────────────────────────────────────
@@ -526,6 +533,8 @@ if [[ "$WHISPER_STOP_REQUESTED" == true ]]; then
     echo "Whisper processing stopped."
     exit "$WHISPER_STATUS"
 fi
+
+concatenate_transcripts
 
 echo
 echo "All audio segments have been processed."
