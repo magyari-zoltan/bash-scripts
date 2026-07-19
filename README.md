@@ -4,9 +4,9 @@ This repository currently contains a single script:
 
 - `transcribe.sh` — audio recording and Whisper-based transcription
 
-## `transcribe.sh`
+## [transcribe.sh](./transcribe.sh)
 
-This script records PulseAudio/PipeWire audio output, then automatically passes the recorded segments to the `whisper` command.
+This script records PulseAudio / PipeWire audio output, then automatically passes the recorded segments to the `whisper` command.
 
 ### What does it do?
 
@@ -29,6 +29,7 @@ This script records PulseAudio/PipeWire audio output, then automatically passes 
 ```bash
 sudo pacman -S ffmpeg python
 python -m venv ~/.venvs/whisper
+
 source ~/.venvs/whisper/bin/activate
 pip install --upgrade pip
 pip install -U openai-whisper
@@ -38,51 +39,73 @@ deactivate
 ### Usage
 
 ```bash
-./transcribe.sh --language <language> --task <transcribe|translate>
+./transcribe.sh \
+    --language <language> \
+    --task <transcribe|translate> \
+    [--audio-source <source>]
 ```
 
 #### Options
 
-- `-l, --language` — audio language
-- `-t, --task` — `transcribe` or `translate`
-- `--continue-recording` — continue an existing recording
-- `-h, --help` — show help
+| Option                 | Description                                                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `-l, --language`       | Audio language.                                                                                                                                                    |
+| `-t, --task`           | Valid values: `transcribe` or `translate`.                                                                                                                         |
+| `--audio-source`       | Audio source to record.<br>Find available sources with: `pactl list short sources`.<br>If omitted, the script uses the monitor source of `pactl get-default-sink`. |
+| `--continue-recording` | Continue an existing recording.                                                                                                                                    |
+| `-h, --help`           | Show help.                                                                                                                                                         |
 
 ### Examples
 
 Start a new recording in English:
 
 ```bash
-./transcribe.sh --language English --task transcribe
+./transcribe.sh \
+    --language English \
+    --task transcribe
 ```
 
 Translate to English:
 
 ```bash
-./transcribe.sh --language English --task translate
+./transcribe.sh \
+    --language English \
+    --task translate
 ```
 
 Continue an existing recording:
 
 ```bash
 ./transcribe.sh \
-  --language English \
-  --task transcribe \
-  --continue-recording
+    --language English \
+    --task transcribe \
+    --continue-recording
 ```
 
 Run only the segments that have not been processed yet:
 
 ```bash
-./transcribe.sh --language English --task transcribe
+./transcribe.sh \
+    --language English \
+    --task transcribe
 ```
 
 ### Note
 
-By default, the script uses the following PulseAudio/PipeWire source:
+If recording has already finished, `Ctrl+C` stops Whisper immediately.
+
+Find available audio sources with:
 
 ```bash
-alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor
+pactl list short sources | grep monitor
+
+# Example output
+# 74      alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor          PipeWire        s32le 2ch 48000Hz       SUSPENDED
+# 75      alsa_input.pci-0000_00_1f.3.analog-stereo                 PipeWire        s32le 2ch 48000Hz       SUSPENDED
 ```
 
-If you want a different audio source, change the `AUDIO_SOURCE` value in the script.
+If ommitted, the script uses this command to find the default output's monitor source automatically:
+
+```bash
+pactl get-default-sink
+```

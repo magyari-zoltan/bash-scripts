@@ -8,6 +8,7 @@
 #
 #   sudo pacman -S ffmpeg python
 #   python -m venv ~/.venvs/whisper
+#
 #   source ~/.venvs/whisper/bin/activate
 #   pip install --upgrade pip
 #   pip install -U openai-whisper
@@ -17,10 +18,7 @@
 
 set -u
 
-# Find the input name with:
-#   pactl list short sources
-# and pick the `*.monitor` source of the output device ffmpeg should record.
-AUDIO_SOURCE="alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor"
+AUDIO_SOURCE=""
 WORK_DIR="./recording"
 WHISPER_VENV="$HOME/.venvs/whisper"
 
@@ -30,7 +28,8 @@ CONTINUE_RECORDING=false
 
 FFMPEG_PID=""
 WHISPER_PID=""
-STOP_REQUESTED=false
+RECORDING_STOP_REQUESTED=false
+WHISPER_STOP_REQUESTED=false
 VENV_ACTIVATED_BY_SCRIPT=false
 
 RECORDING_FINISHED_FILE="$WORK_DIR/recording.finished"
@@ -38,9 +37,11 @@ RECORDING_FINISHED_FILE="$WORK_DIR/recording.finished"
 
 usage() {
     cat <<EOF
+This utility captures audio and transcribes it into text.
+
 Usage:
 
-    $0 --language <language> --task <task> [--continue-recording]
+    $0 --language <language> --task <task> [--audio-source <source>] [--continue-recording]
 
 Examples:
 
@@ -50,15 +51,19 @@ Examples:
 
     Continue an existing recording:
 
-        $0 \
-            --language Romanian \
-            --task transcribe \
-            --continue-recording
+        $0 --language Romanian --task transcribe --continue-recording
+
+    Use a specific audio source:
+
+        $0 --language Romanian --task transcribe --audio-source alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor
 
 Options:
 
     -l, --language             Audio language
     -t, --task                 Whisper task: transcribe or translate
+        --audio-source         Audio source to record
+                               Defaults to: '$(pactl get-default-sink)'
+                               Find available sources with: 'pactl list short sources'
         --continue-recording   Continue recording after existing audio segments
     -h, --help                 Show this help
 
@@ -66,7 +71,7 @@ Signal handling:
 
     First Ctrl+C:
         Stop the FFmpeg recording.
-        Whisper continues processing all remaining audio segments.
+        If recording has already finished, stop Whisper.
 
     Second Ctrl+C:
         Stop Whisper processing and exit the script.
@@ -89,6 +94,11 @@ while [[ $# -gt 0 ]]; do
 
         -t|--task)
             TASK="${2:-}"
+            shift 2
+            ;;
+
+        --audio-source)
+            AUDIO_SOURCE="${2:-}"
             shift 2
             ;;
 
@@ -120,6 +130,17 @@ fi
 if [[ "$TASK" != "transcribe" && "$TASK" != "translate" ]]; then
     echo "Error: --task must be either 'transcribe' or 'translate'." >&2
     exit 1
+fi
+
+if [[ -z "$AUDIO_SOURCE" ]]; then
+    default_sink="$(pactl get-default-sink 2>/dev/null || true)"
+
+    if [[ -z "$default_sink" ]]; then
+        echo "Error: could not determine the default audio sink." >&2
+        exit 1
+    fi
+
+    AUDIO_SOURCE="${default_sink}.monitor"
 fi
 
 
@@ -268,13 +289,22 @@ stop_recording() {
     echo
     echo "Stop requested..."
 
-    STOP_REQUESTED=true
-
-    if [[ -n "$FFMPEG_PID" ]] &&
+    if [[ "$RECORDING_STOP_REQUESTED" == false ]] &&
+       [[ -n "$FFMPEG_PID" ]] &&
        kill -0 "$FFMPEG_PID" 2>/dev/null; then
 
+        RECORDING_STOP_REQUESTED=true
         echo "Stopping FFmpeg..."
         kill -INT "$FFMPEG_PID"
+        return
+    fi
+
+    if [[ -n "$WHISPER_PID" ]] &&
+       kill -0 "$WHISPER_PID" 2>/dev/null; then
+
+        WHISPER_STOP_REQUESTED=true
+        echo "Stopping Whisper..."
+        kill -INT "$WHISPER_PID"
     fi
 }
 
@@ -299,6 +329,9 @@ transcribe_worker() {
     local ready_file
 
     while true; do
+        if [[ "$WHISPER_STOP_REQUESTED" == true ]]; then
+            break
+        fi
 
         audio_file="$(get_audio_file "$index")"
         output_file="$(get_output_file "$index")"
@@ -312,6 +345,9 @@ transcribe_worker() {
 
         # Process completed audio segments
         if [[ -f "$ready_file" && -s "$audio_file" ]]; then
+            if [[ "$WHISPER_STOP_REQUESTED" == true ]]; then
+                break
+            fi
 
             echo
             echo "Processing with Whisper:"
@@ -436,7 +472,7 @@ WHISPER_PID=$!
 index="$(get_next_recording_index)"
 
 
-while [[ "$STOP_REQUESTED" == false ]]; do
+while [[ "$RECORDING_STOP_REQUESTED" == false ]]; do
 
     segment_time="$(get_segment_time "$index")"
 
@@ -483,6 +519,13 @@ echo "Audio recording stopped."
 echo "Whisper will continue processing the remaining segments."
 
 wait "$WHISPER_PID"
+WHISPER_STATUS=$?
+
+if [[ "$WHISPER_STOP_REQUESTED" == true ]]; then
+    echo
+    echo "Whisper processing stopped."
+    exit "$WHISPER_STATUS"
+fi
 
 echo
 echo "All audio segments have been processed."
